@@ -1,0 +1,1442 @@
+local BoneThrowModule = {}
+
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local DamageModule = require(game.ServerScriptService.Other.DamageModule)
+
+-- Submodules
+local spawn = require(script.main.spawn)
+local spin = require(script.main.spin)
+local fly = require(script.main.fly)
+local sound = require(script.main.sound)
+local disappear = require(script.main.disappear)
+
+-- Direction Modules
+local click = require(script.direction.click)
+local straight = require(script.direction.straight)
+local custom = require(script.direction.custom)
+
+-- Special Variants
+local MiddleBoneModule = require(script.special.middle.MiddleBoneModule)
+local around = require(script.other.around)
+local multiple = require(script.other.multiple)
+local sticky = require(script.other.sticky)
+local pierce = require(script.other.pierce)
+local stickPierce = require(script.other.stickPierce)
+local piercing = require(script.other.sticky.piercing)
+
+-- Visual Variants
+local blue = require(script.variants.blue)
+local orange = require(script.variants.orange)
+local randomBO = require(script.variants.randomBO)
+
+BoneThrowModule.defaults = {
+	travelSpeed      = 50,
+	boneLifetime     = 5,
+	rotationTime     = 0.5,
+	spinsPerSecond   = 2,
+	damageAmount     = 10,
+	specialLifetime  = 3,
+	wallLifetime     = 5,
+	fadeDuration     = 0.5,
+	boneLocation     = nil,
+	direction        = "click",
+	customDirection  = nil,
+	middle           = {enabled = false, numBones = 8, spawnRadius = 15, boneHeight = 2.5},
+	multiple         = {enabled = false, numBones = 3, spread = 2},
+	around           = {enabled = false, numBones = 8, spawnRadius = 5},
+	collision        = nil,
+	variant          = nil
+}
+
+function BoneThrowModule.throwBones(player, spawnPosition, targetPosition, options)
+	options = options or {}
+
+	local defaults = BoneThrowModule.defaults
+	local mergedOptions = {
+		travelSpeed      = options.travelSpeed      or defaults.travelSpeed,
+		boneLifetime     = options.boneLifetime     or defaults.boneLifetime,
+		rotationTime     = options.rotationTime     or defaults.rotationTime,
+		spinsPerSecond   = options.spinsPerSecond   or defaults.spinsPerSecond,
+		damageAmount     = options.damageAmount     or defaults.damageAmount,
+		specialLifetime  = options.specialLifetime  or defaults.specialLifetime,
+		wallLifetime     = options.wallLifetime     or defaults.wallLifetime,
+		fadeDuration     = options.fadeDuration     or defaults.fadeDuration,
+		boneLocation     = options.boneLocation     or defaults.boneLocation,
+		direction        = options.direction        or defaults.direction,
+		customDirection  = options.customDirection  or defaults.customDirection,
+		middle           = options.middle           or defaults.middle,
+		multiple         = options.multiple         or defaults.multiple,
+		around           = options.around           or defaults.around,
+		collision        = options.collision        or defaults.collision,
+		variant          = options.variant          or defaults.variant,
+		targetCharacter  = options.targetCharacter
+	}
+
+	if mergedOptions.middle.enabled then
+		mergedOptions.multiple.enabled = true
+		mergedOptions.multiple.numBones = mergedOptions.middle.numBones
+	end
+
+	local direction
+	if mergedOptions.direction == "click" then
+		direction = click.getDirection(spawnPosition, targetPosition)
+	elseif mergedOptions.direction == "straight" then
+		direction = straight.getDirection(player)
+		targetPosition = spawnPosition + direction * 1000
+	elseif mergedOptions.direction == "custom" then
+		direction = custom.getDirection(spawnPosition, targetPosition, mergedOptions)
+	else
+		direction = click.getDirection(spawnPosition, targetPosition)
+	end
+
+	local bones = {}
+	local targetPoint = targetPosition
+	if mergedOptions.middle.enabled then
+		bones, targetPoint = MiddleBoneModule.spawnBones(player, targetPosition, mergedOptions)
+	elseif mergedOptions.around.enabled then
+		bones = around.spawnBones(player, mergedOptions)
+		for _, data in ipairs(bones) do
+			data.player = player
+		end
+	elseif mergedOptions.multiple.enabled then
+		bones = multiple.spawnBones(player, spawnPosition, targetPosition, mergedOptions)
+		for _, data in ipairs(bones) do
+			data.player = player
+		end
+	else
+		local bone, targetCFrame = spawn.spawnBone(spawnPosition, targetPosition, mergedOptions)
+		if bone then
+			bone.Anchored = true
+			bone:SetAttribute("OwnerName", player.Name)
+			DamageModule:Attach(bone, mergedOptions.damageAmount, player.Name)
+			table.insert(bones, {
+				bone = bone,
+				spawnPosition = spawnPosition,
+				targetCFrame = targetCFrame,
+				direction = direction,
+				hasStuck = false,
+				player = player,
+				options = mergedOptions
+			})
+		end
+	end
+
+	-- Ensure OwnerName is set for all bones
+	for _, data in ipairs(bones) do
+		local bone = data.bone
+		if bone and not bone:GetAttribute("OwnerName") then
+			bone:SetAttribute("OwnerName", player.Name)
+			print("Set OwnerName for bone:", bone.Name, "to", player.Name)
+		else
+			print("OwnerName already set for bone:", bone.Name, "to", bone:GetAttribute("OwnerName"))
+		end
+	end
+
+	if #bones > 0 then
+		sound.playSummonSound()
+	end
+
+	local spinTime = spin.spinBones(bones, mergedOptions)
+
+	if #bones > 0 then
+		sound.playFlySound()
+	end
+
+	-- Keep bones anchored during flight
+	local travelTime = mergedOptions.boneLifetime - spinTime
+	if travelTime < 0 then
+		travelTime = 0.1
+	end
+	mergedOptions.travelTime = travelTime
+	local extendedTravelTime = mergedOptions.boneLifetime + mergedOptions.fadeDuration
+	fly.flyBones(bones, {travelSpeed = mergedOptions.travelSpeed, travelTime = extendedTravelTime}, mergedOptions.middle.enabled and targetPoint.Y)
+
+	local cleanupDelay = mergedOptions.middle.enabled and travelTime or mergedOptions.boneLifetime
+
+	for _, data in ipairs(bones) do
+		local bone = data.bone
+		if bone then
+			print("Bone state before collision:", bone.Name, "Anchored:", bone.Anchored)
+			if mergedOptions.collision == "sticky" then
+				sticky.apply(bone, mergedOptions.specialLifetime, mergedOptions.wallLifetime, data, mergedOptions.fadeDuration)
+			elseif mergedOptions.collision == "pierce" then
+				pierce.apply(bone)
+			elseif mergedOptions.collision == "stickPierce" then
+				stickPierce.apply(bone, cleanupDelay, data, mergedOptions.fadeDuration)
+			elseif mergedOptions.collision == "piercing" then
+				piercing.apply(bone, cleanupDelay, data, mergedOptions.fadeDuration)
+			end
+		end
+	end
+
+	for _, data in ipairs(bones) do
+		local bone = data.bone
+		if bone then
+			local checkStuckConnection
+			checkStuckConnection = game:GetService("RunService").Heartbeat:Connect(function()
+				if data.hasStuck then
+					DamageModule:Detach(bone)
+					checkStuckConnection:Disconnect()
+				end
+			end)
+		end
+	end
+
+	task.delay(cleanupDelay - mergedOptions.fadeDuration, function()
+		local bonesToFade = {}
+		for _, data in ipairs(bones) do
+			if data.bone then
+				print("Bone hasStuck state before fade:", data.bone.Name, data.hasStuck)
+				if not data.hasStuck then
+					table.insert(bonesToFade, data)
+				end
+			else
+				print("Bone is nil before fade")
+			end
+		end
+
+		if #bonesToFade > 0 then
+			disappear.fadeOutBones(bonesToFade, mergedOptions.fadeDuration)
+		end
+	end)
+
+	task.delay(cleanupDelay, function()
+		for _, data in ipairs(bones) do
+			if data.bone then
+				print("Bone hasStuck state before cleanup:", data.bone.Name, data.hasStuck)
+				if not data.hasStuck then
+					data.bone:Destroy()
+				end
+			else
+				print("Bone is nil before cleanup")
+			end
+		end
+	end)
+
+	for _, data in ipairs(bones) do
+		local bone = data.bone
+		if bone then
+			if mergedOptions.variant == "blue" then
+				blue.apply(bone)
+			elseif mergedOptions.variant == "orange" then
+				orange.apply(bone)
+			elseif mergedOptions.variant == "randomBO" then
+				randomBO.apply(bone)
+			end
+		end
+	end
+end
+
+return BoneThrowModule
+local CollectionService = game:GetService("CollectionService")
+local RunService = game:GetService("RunService")
+local Workspace = game:GetService("Workspace")
+local disappear = require(script.Parent.Parent.main.disappear)
+local sound = require(script.Parent.Parent.main.sound)
+local DamageModule = require(game.ServerScriptService.Other.DamageModule)
+
+local stickPierce = {}
+
+function stickPierce.apply(bone, cleanupDelay, boneData, fadeDuration)
+	bone.CanCollide = false
+
+	local lastTouched = 0
+	local debounceTime = 0.1
+
+	local touchedConnection
+	touchedConnection = bone.Touched:Connect(function(hit)
+		local currentTime = tick()
+		if currentTime - lastTouched < debounceTime then
+			return
+		end
+		lastTouched = currentTime
+
+		if string.lower(hit.Name) == "bone" or CollectionService:HasTag(hit, "Bone") then
+			print("StickPierce bone ignored hit: Hit another bone", hit.Name)
+			return
+		end
+		local owner = boneData.player
+		if owner and hit.Parent == owner.Character then
+			print("StickPierce bone ignored hit: Hit owner's character", hit.Name)
+			return
+		end
+		local character = hit.Parent
+		local humanoid = character and character:FindFirstChild("Humanoid")
+		if humanoid and hit:IsDescendantOf(character) then
+			print("StickPierce bone pierced through character part:", hit.Name)
+			return
+		end
+	end)
+
+	local raycastConnection
+	raycastConnection = RunService.Heartbeat:Connect(function(deltaTime)
+		if boneData.hasStuck then
+			raycastConnection:Disconnect()
+			return
+		end
+
+		local direction = boneData.direction
+		local origin = bone.Position
+		local travelSpeed = boneData.options and boneData.options.travelSpeed or 50
+		local raycastDistance = travelSpeed * deltaTime
+		local raycastParams = RaycastParams.new()
+		raycastParams.FilterDescendantsInstances = {bone}
+		local owner = boneData.player
+		if owner then
+			table.insert(raycastParams.FilterDescendantsInstances, owner.Character)
+		end
+		raycastParams.FilterType = Enum.RaycastFilterType.Exclude
+
+		local raycastResult = Workspace:Raycast(origin, direction * raycastDistance, raycastParams)
+		if raycastResult then
+			local hit = raycastResult.Instance
+			local hitPosition = raycastResult.Position
+
+			if string.lower(hit.Name) == "bone" or CollectionService:HasTag(hit, "Bone") then
+				print("StickPierce raycast ignored hit: Hit another bone", hit.Name)
+				return
+			end
+
+			if owner and hit.Parent == owner.Character then
+				print("StickPierce raycast ignored hit: Hit owner's character", hit.Name)
+				return
+			end
+
+			local character = hit.Parent
+			local humanoid = character and character:FindFirstChild("Humanoid")
+			if humanoid and hit:IsDescendantOf(character) then
+				print("StickPierce raycast pierced through character part:", hit.Name)
+				return
+			else
+				print("StickPierce raycast sticking to wall:", hit.Name)
+				if boneData.tween then
+					boneData.tween:Cancel()
+					boneData.tween = nil
+				end
+
+				bone.Position = hitPosition
+				local weld = Instance.new("WeldConstraint")
+				weld.Part0 = hit
+				weld.Part1 = bone
+				weld.Parent = bone
+
+				sound.playImpactSound(bone)
+				bone.CanCollide = true
+				bone.Anchored = false
+				boneData.hasStuck = true
+
+				DamageModule:Detach(bone)
+
+				task.delay(cleanupDelay, function()
+					if bone then
+						local boneDataToFade = {bone = bone}
+						disappear.fadeOutBones({boneDataToFade}, fadeDuration)
+						task.wait(fadeDuration)
+						if bone then
+							bone:Destroy()
+						end
+					end
+				end)
+
+				touchedConnection:Disconnect()
+				raycastConnection:Disconnect()
+			end
+		end
+	end)
+
+	task.delay(cleanupDelay, function()
+		if touchedConnection.Connected then
+			print("StickPierce bone Touched event never fired for bone:", bone.Name)
+			touchedConnection:Disconnect()
+		end
+		if raycastConnection.Connected then
+			print("StickPierce bone raycast never hit a wall for bone:", bone.Name)
+			raycastConnection:Disconnect()
+		end
+	end)
+end
+
+return stickPierce
+local CollectionService = game:GetService("CollectionService")
+local RunService = game:GetService("RunService")
+local Workspace = game:GetService("Workspace")
+local PhysicsService = game:GetService("PhysicsService")
+local characters = require(script.characters)
+local walls = require(script.walls)
+local vfx = require(script.Parent.Parent.main.vfx) -- Add vfx module
+
+local sticky = {}
+
+function sticky.apply(bone, specialLifetime, wallLifetime, boneData, fadeDuration)
+	bone.CanCollide = false
+	bone.Anchored = true
+	bone.Massless = true
+	bone.CanTouch = true
+
+	-- Get the owner
+	local owner = boneData.player
+	if not owner then
+		warn("Owner not found in boneData!")
+		return false
+	end
+
+	local ownerName = bone:GetAttribute("OwnerName")
+	if not ownerName then
+		warn("OwnerName not set on bone!")
+		return false
+	end
+
+	local ownerCharacter = owner.Character
+	if not ownerCharacter then
+		warn("Owner character not found for ownerName:", ownerName)
+		return false
+	end
+	print("Sticky bone owner character found:", ownerCharacter.Name)
+
+	-- Define collision groups
+	local boneGroup = "BoneGroup"
+	local ownerGroup = "OwnerGroup"
+
+	-- Register collision groups if they don't exist
+	if not PhysicsService:IsCollisionGroupRegistered(boneGroup) then
+		PhysicsService:RegisterCollisionGroup(boneGroup)
+	end
+	if not PhysicsService:IsCollisionGroupRegistered(ownerGroup) then
+		PhysicsService:RegisterCollisionGroup(ownerGroup)
+	end
+
+	-- Set collision groups for the bone
+	bone.CollisionGroup = boneGroup
+
+	-- Set collision groups for the owner's character parts and disable CanTouch
+	for _, part in ipairs(ownerCharacter:GetDescendants()) do
+		if part:IsA("BasePart") then
+			part.CollisionGroup = ownerGroup
+			part.CanTouch = false
+		end
+	end
+
+	-- Ensure the groups don't collide
+	PhysicsService:CollisionGroupSetCollidable(boneGroup, ownerGroup, false)
+
+	local lastTouched = 0
+	local debounceTime = 0.1
+
+	local touchedConnection
+	touchedConnection = bone.Touched:Connect(function(hit)
+		local currentTime = tick()
+		if currentTime - lastTouched < debounceTime then
+			print("Sticky bone debounce active, skipping Touched event for:", hit.Name)
+			return
+		end
+		lastTouched = currentTime
+
+		if string.lower(hit.Name) == "bone" or CollectionService:HasTag(hit, "Bone") then
+			print("Sticky bone ignored hit: Hit another bone", hit.Name)
+			return
+		end
+
+		if hit.Parent == ownerCharacter or hit:IsDescendantOf(ownerCharacter) then
+			print("Sticky bone ignored hit: Hit owner's character", hit.Name)
+			return
+		end
+
+		if CollectionService:HasTag(hit, "AttachedBone") then
+			print("Sticky bone hit an attached bone:", hit.Name)
+			bone.Position = hit.Position
+			local weld = Instance.new("WeldConstraint")
+			weld.Part0 = hit
+			weld.Part1 = bone
+			weld.Parent = bone
+			bone.CanCollide = false
+			bone.Anchored = false
+			boneData.hasStuck = true
+			CollectionService:AddTag(bone, "AttachedBone")
+			touchedConnection:Disconnect()
+			return
+		end
+
+		local character = hit.Parent
+		local humanoid = character and character:FindFirstChild("Humanoid")
+		if humanoid and hit:IsDescendantOf(character) then
+			print("Sticky bone touched character part:", hit.Name)
+			if boneData.tween then
+				boneData.tween:Cancel()
+				boneData.tween = nil
+			end
+			local direction = boneData.direction
+			local origin = bone.Position - direction * 0.1
+			local raycastParams = RaycastParams.new()
+			raycastParams.FilterDescendantsInstances = {bone}
+			if owner then
+				table.insert(raycastParams.FilterDescendantsInstances, owner.Character)
+			end
+			raycastParams.FilterType = Enum.RaycastFilterType.Exclude
+			local raycastResult = Workspace:Raycast(origin, direction * 10, raycastParams)
+			local hitPosition = bone.Position
+			if raycastResult and raycastResult.Instance == hit then
+				bone.Position = raycastResult.Position
+				hitPosition = raycastResult.Position
+			end
+			-- Add blood VFX
+			if hit:IsA("BasePart") then
+				vfx.enableBloodEffects(bone, hit, hitPosition)
+			else
+				warn("Hit part is not a BasePart, cannot apply blood VFX:", hit.Name)
+			end
+			characters.attachToCharacter(bone, hit, boneData, specialLifetime, fadeDuration)
+			touchedConnection:Disconnect()
+		end
+	end)
+
+	local raycastConnection
+	raycastConnection = RunService.Heartbeat:Connect(function(deltaTime)
+		if boneData.hasStuck then
+			raycastConnection:Disconnect()
+			return
+		end
+
+		local direction = boneData.direction
+		local origin = bone.Position
+		local travelSpeed = boneData.options and boneData.options.travelSpeed or 50
+		local raycastDistance = travelSpeed * deltaTime
+		local raycastParams = RaycastParams.new()
+		raycastParams.FilterDescendantsInstances = {bone}
+		if owner then
+			table.insert(raycastParams.FilterDescendantsInstances, owner.Character)
+		end
+		raycastParams.FilterType = Enum.RaycastFilterType.Exclude
+
+		local raycastResult = Workspace:Raycast(origin, direction * raycastDistance, raycastParams)
+		if raycastResult then
+			local hit = raycastResult.Instance
+			local hitPosition = raycastResult.Position
+
+			if string.lower(hit.Name) == "bone" or CollectionService:HasTag(hit, "Bone") then
+				print("Sticky raycast ignored hit: Hit another bone", hit.Name)
+				return
+			end
+
+			if owner and (hit.Parent == owner.Character or hit:IsDescendantOf(owner.Character)) then
+				print("Sticky raycast ignored hit: Hit owner's character", hit.Name)
+				return
+			end
+
+			local character = hit.Parent
+			local humanoid = character and character:FindFirstChild("Humanoid")
+			if humanoid and hit:IsDescendantOf(character) then
+				return
+			else
+				print("Sticky raycast sticking to wall:", hit.Name)
+				if boneData.tween then
+					boneData.tween:Cancel()
+					boneData.tween = nil
+				end
+				bone.Position = hitPosition
+				walls.attachToWall(bone, hit, boneData, wallLifetime, fadeDuration)
+				touchedConnection:Disconnect()
+				raycastConnection:Disconnect()
+			end
+		end
+	end)
+
+	task.delay(5, function()
+		if touchedConnection.Connected then
+			print("Sticky bone Touched event never fired for bone:", bone.Name)
+			touchedConnection:Disconnect()
+		end
+		if raycastConnection.Connected then
+			print("Sticky bone raycast never hit a wall for bone:", bone.Name)
+			raycastConnection:Disconnect()
+		end
+	end)
+
+	return false
+end
+
+return sticky
+local CollectionService = game:GetService("CollectionService")
+local RunService = game:GetService("RunService")
+local Workspace = game:GetService("Workspace")
+local disappear = require(script.Parent.Parent.Parent.main.disappear)
+local sound = require(script.Parent.Parent.Parent.main.sound)
+local DamageModule = require(game.ServerScriptService.Other.DamageModule)
+
+local piercing = {}
+
+local function decimalRandom(minimum, maximum)
+	return math.random() * (maximum - minimum) + minimum
+end
+
+function piercing.apply(bone, cleanupDelay, boneData, fadeDuration)
+	bone.CanCollide = false
+
+	local lastTouched = 0
+	local debounceTime = 0.1
+
+	local touchedConnection
+	touchedConnection = bone.Touched:Connect(function(hit)
+		local currentTime = tick()
+		if currentTime - lastTouched < debounceTime then
+			return
+		end
+		lastTouched = currentTime
+
+		if string.lower(hit.Name) == "bone" or CollectionService:HasTag(hit, "Bone") then
+			print("Piercing bone ignored hit: Hit another bone", hit.Name)
+			return
+		end
+		local owner = boneData.player
+		if owner and hit.Parent == owner.Character then
+			print("Piercing bone ignored hit: Hit owner's character", hit.Name)
+			return
+		end
+		local character = hit.Parent
+		local humanoid = character and character:FindFirstChild("Humanoid")
+		if humanoid and hit:IsDescendantOf(character) then
+			print("Piercing bone pierced through character part:", hit.Name)
+			return
+		end
+	end)
+
+	local raycastConnection
+	raycastConnection = RunService.Heartbeat:Connect(function(deltaTime)
+		if boneData.hasStuck then
+			raycastConnection:Disconnect()
+			return
+		end
+
+		local direction = boneData.direction
+		local origin = bone.Position
+		local travelSpeed = boneData.options and boneData.options.travelSpeed or 50
+		local raycastDistance = travelSpeed * deltaTime
+		local raycastParams = RaycastParams.new()
+		raycastParams.FilterDescendantsInstances = {bone}
+		local owner = boneData.player
+		if owner then
+			table.insert(raycastParams.FilterDescendantsInstances, owner.Character)
+		end
+		raycastParams.FilterType = Enum.RaycastFilterType.Exclude
+
+		local raycastResult = Workspace:Raycast(origin, direction * raycastDistance, raycastParams)
+		if raycastResult then
+			local hit = raycastResult.Instance
+			local hitPosition = raycastResult.Position
+
+			if string.lower(hit.Name) == "bone" or CollectionService:HasTag(hit, "Bone") then
+				print("Piercing raycast ignored hit: Hit another bone", hit.Name)
+				return
+			end
+
+			if owner and hit.Parent == owner.Character then
+				print("Piercing raycast ignored hit: Hit owner's character", hit.Name)
+				return
+			end
+
+			local character = hit.Parent
+			local humanoid = character and character:FindFirstChild("Humanoid")
+			if humanoid and hit:IsDescendantOf(character) then
+				print("Piercing raycast pierced through character part:", hit.Name)
+				return
+			else
+				print("Piercing raycast sticking to wall:", hit.Name)
+				if boneData.tween then
+					boneData.tween:Cancel()
+					boneData.tween = nil
+				end
+
+				bone.Position = hitPosition
+				local weld = Instance.new("WeldConstraint")
+				weld.Part0 = hit
+				weld.Part1 = bone
+				weld.Parent = bone
+
+				local pierceNormal = direction.Unit
+				local pierceDepth = decimalRandom(0.25, 1.25)
+				bone.Position = bone.Position + pierceNormal * pierceDepth
+				bone.CFrame = CFrame.new(bone.Position) * (bone.CFrame - bone.CFrame.Position)
+
+				sound.playImpactSound(bone)
+				bone.CanCollide = true
+				bone.Anchored = false
+				boneData.hasStuck = true
+
+				DamageModule:Detach(bone)
+
+				task.delay(cleanupDelay, function()
+					if bone then
+						local boneDataToFade = {bone = bone}
+						disappear.fadeOutBones({boneDataToFade}, fadeDuration)
+						task.wait(fadeDuration)
+						if bone then
+							bone:Destroy()
+						end
+					end
+				end)
+
+				touchedConnection:Disconnect()
+				raycastConnection:Disconnect()
+			end
+		end
+	end)
+
+	task.delay(cleanupDelay, function()
+		if touchedConnection.Connected then
+			print("Piercing bone Touched event never fired for bone:", bone.Name)
+			touchedConnection:Disconnect()
+		end
+		if raycastConnection.Connected then
+			print("Piercing bone raycast never hit a wall for bone:", bone.Name)
+			raycastConnection:Disconnect()
+		end
+	end)
+end
+
+return piercing
+local MiddleBoneModule = {}
+
+local spawn = require(script.Parent.Parent.Parent.main.spawn)
+local DamageModule = require(game.ServerScriptService.Other.DamageModule)
+local Workspace = game:GetService("Workspace")
+local CollectionService = game:GetService("CollectionService")
+
+function MiddleBoneModule.spawnBones(player, targetPosition, options)
+	if not player or not player.Character then
+		warn("Player or player character not found!")
+		return {}, targetPosition
+	end
+
+	local damageAmount = options.damageAmount or 10
+	local adjustedTargetPosition = targetPosition
+	local applyHeightAdjustment = false
+
+	-- Only adjust height if not targeting a character
+	if not options.targetCharacter then
+		-- Collect all bones to exclude from the raycast
+		local bonesToExclude = CollectionService:GetTagged("Bone")
+		local filterInstances = {player.Character}
+		for _, bone in ipairs(bonesToExclude) do
+			table.insert(filterInstances, bone)
+		end
+
+		-- Raycast downward from just above the target position to detect the surface
+		local rayOrigin = targetPosition + Vector3.new(0, 2, 0)
+		local rayDirection = Vector3.new(0, -5, 0)
+		local raycastParams = RaycastParams.new()
+		raycastParams.FilterType = Enum.RaycastFilterType.Exclude
+		raycastParams.FilterDescendantsInstances = filterInstances
+		local rayResult = Workspace:Raycast(rayOrigin, rayDirection, raycastParams)
+
+		if rayResult and rayResult.Instance and rayResult.Instance:IsA("BasePart") then
+			local hitPosition = rayResult.Position
+			local normal = rayResult.Normal
+			local isFloor = math.abs(normal.Y) > 0.9
+			local yDistance = math.abs(hitPosition.Y - targetPosition.Y)
+			if isFloor and yDistance < 2 then
+				adjustedTargetPosition = Vector3.new(targetPosition.X, hitPosition.Y, targetPosition.Z)
+				applyHeightAdjustment = true
+				print("Detected floor surface below click, adjusted position:", adjustedTargetPosition, "Will apply boneHeight")
+			else
+				print("Detected non-floor surface or too far below (yDistance:", yDistance, "), using original target position:", targetPosition)
+			end
+		else
+			-- If the downward raycast misses, try a raycast from the player's position to the target position
+			local rootPart = player.Character:FindFirstChild("HumanoidRootPart")
+			if rootPart then
+				local rayOrigin = rootPart.Position
+				local rayDirection = targetPosition - rayOrigin
+				local rayResult = Workspace:Raycast(rayOrigin, rayDirection, raycastParams)
+				if rayResult and rayResult.Instance and rayResult.Instance:IsA("BasePart") then
+					local normal = rayResult.Normal
+					local isFloor = math.abs(normal.Y) > 0.9
+					if isFloor then
+						local floorHeight = rayResult.Position.Y
+						adjustedTargetPosition = Vector3.new(targetPosition.X, floorHeight, targetPosition.Z)
+						applyHeightAdjustment = true
+						print("Detected floor surface via player raycast, adjusted position:", adjustedTargetPosition, "Will apply boneHeight")
+					else
+						print("Detected non-floor surface via player raycast (e.g., wall), using original target position:", targetPosition)
+					end
+				else
+					print("Both raycasts missed, using original target position:", targetPosition)
+				end
+			else
+				print("HumanoidRootPart not found, using original target position:", targetPosition)
+			end
+		end
+	else
+		print("Clicked on a character, using original target position:", targetPosition)
+	end
+
+	-- Pass the flag in options
+	local modifiedOptions = table.clone(options)
+	modifiedOptions.applyHeightAdjustment = applyHeightAdjustment
+
+	local bones, targetPoint = spawn.spawnBonesInCircle(adjustedTargetPosition, modifiedOptions)
+
+	for _, data in ipairs(bones) do
+		local bone = data.bone
+		if bone then
+			DamageModule:Attach(bone, damageAmount, player.Name)
+			bone.Anchored = true
+			data.player = player
+			data.options = options
+			local expectedDirection = (targetPoint - data.spawnPosition).Unit
+			data.direction = data.direction and data.direction or expectedDirection
+			bone:SetAttribute("OwnerName", player.Name)
+		end
+	end
+
+	return bones, targetPoint
+end
+
+return MiddleBoneModule
+local click = {}
+function click.getDirection(spawnPosition, targetPosition)
+	return (targetPosition - spawnPosition).Unit
+end
+return click
+local custom = {}
+function custom.getDirection(spawnPosition, targetPosition, options)
+	return options.customDirection or (targetPosition - spawnPosition).Unit
+end
+return custom
+local straight = {}
+function straight.getDirection(player)
+	local character = player.Character
+	if not character then return Vector3.new(0, 0, 1) end
+	local root = character:FindFirstChild("HumanoidRootPart")
+	if not root then return Vector3.new(0, 0, 1) end
+	return root.CFrame.LookVector
+end
+return straight
+local TweenService = game:GetService("TweenService")
+local disappear = {}
+-- Fades out a list of bones over the specified duration
+-- bones: List of bone data, where each entry has a 'bone' field (e.g., {bone = bone, ...})
+-- duration: Time in seconds to complete the fade
+function disappear.fadeOutBones(bones, duration)
+	for _, data in ipairs(bones) do
+		local bone = data.bone
+		if bone then
+			-- Check if the bone is a single part or a model
+			if bone:IsA("BasePart") then
+				-- Fade out a single part
+				local tweenInfo = TweenInfo.new(duration, Enum.EasingStyle.Linear)
+				local goal = {Transparency = 1}
+				local tween = TweenService:Create(bone, tweenInfo, goal)
+				tween:Play()
+			elseif bone:IsA("Model") then
+				-- Fade out all parts in the model
+				for _, part in ipairs(bone:GetDescendants()) do
+					if part:IsA("BasePart") then
+						local tweenInfo = TweenInfo.new(duration, Enum.EasingStyle.Linear)
+						local goal = {Transparency = 1}
+						local tween = TweenService:Create(part, tweenInfo, goal)
+						tween:Play()
+					end
+				end
+			end
+		end
+	end
+end
+return disappear
+local TweenService = game:GetService("TweenService")
+local sound = require(script.Parent.sound)
+local fly = {}
+function fly.flyBones(bones, flyOptions, targetY)
+	local travelSpeed = flyOptions.travelSpeed
+	local travelTime = flyOptions.travelTime
+	-- Play one fly sound for the entire group of bones
+	if #bones > 0 then
+		sound.playFlySound(bones[1].bone)
+	end
+	for _, data in ipairs(bones) do
+		local bone = data.bone
+		if bone then
+			local startPosition = bone.Position
+			local direction = data.direction
+			local distance = travelSpeed * travelTime
+			local targetPosition = startPosition + direction * distance
+			if targetY then
+				targetPosition = Vector3.new(targetPosition.X, targetY, targetPosition.Z)
+			end
+			local tweenInfo = TweenInfo.new(
+				travelTime,
+				Enum.EasingStyle.Linear,
+				Enum.EasingDirection.InOut
+			)
+			local goal = {Position = targetPosition}
+			local tween = TweenService:Create(bone, tweenInfo, goal)
+			data.tween = tween
+			tween:Play()
+		end
+	end
+end
+return fly
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local sound = {}
+local summonSound = ReplicatedStorage.Assets.sounds:WaitForChild("bone_summon")
+local flySound = ReplicatedStorage.Assets.sounds:WaitForChild("bone_fly")
+local bloodFolder = ReplicatedStorage.Assets.sounds:WaitForChild("blood")
+local impactSound = ReplicatedStorage.Assets.sounds:WaitForChild("impact")
+function sound.playSummonSound(bone)
+	local soundInstance = summonSound:Clone()
+	soundInstance.Parent = bone
+	soundInstance:Play()
+	soundInstance.Ended:Connect(function()
+		soundInstance:Destroy()
+	end)
+end
+function sound.playFlySound(bone)
+	local soundInstance = flySound:Clone()
+	soundInstance.Parent = bone
+	soundInstance:Play()
+	soundInstance.Ended:Connect(function()
+		soundInstance:Destroy()
+	end)
+end
+function sound.playBloodSound(parent)
+	local bloodSounds = bloodFolder:GetChildren()
+	local validSounds = {}
+	for _, child in ipairs(bloodSounds) do
+		if child:IsA("Sound") then
+			table.insert(validSounds, child)
+		end
+	end
+	if #validSounds == 0 then
+		warn("No valid Sound instances found in ReplicatedStorage.Assets.Sounds.blood")
+		return
+	end
+	local selectedSound = validSounds[math.random(1, #validSounds)]
+	local soundInstance = selectedSound:Clone()
+	soundInstance.Parent = parent
+	soundInstance:Play()
+	soundInstance.Ended:Connect(function()
+		soundInstance:Destroy()
+	end)
+end
+function sound.playImpactSound(parent)
+	local soundInstance = impactSound:Clone()
+	soundInstance.Parent = parent
+	soundInstance:Play()
+	soundInstance.Ended:Connect(function()
+		soundInstance:Destroy()
+	end)
+end
+return sound
+local sound = require(script.Parent.sound)
+local CollectionService = game:GetService("CollectionService")
+local spawn = {}
+function spawn.spawnBone(spawnPosition, targetPosition, options)
+	local boneTemplate = options.boneLocation or game:GetService("ReplicatedStorage").Assets:WaitForChild("bone")
+	if not boneTemplate then
+		warn("Bone template not found!")
+		return nil, nil
+	end
+	local bone = boneTemplate:Clone()
+	local debrisFolder = workspace:FindFirstChild("Debris") or Instance.new("Folder", workspace)
+	debrisFolder.Name = "Debris"
+	local bonesFolder = debrisFolder:FindFirstChild("Bones") or Instance.new("Folder", debrisFolder)
+	bonesFolder.Name = "Bones"
+	bone.Parent = bonesFolder
+	bone.Position = spawnPosition
+	local baseCFrame = CFrame.new(spawnPosition, targetPosition)
+	local targetCFrame = baseCFrame * CFrame.Angles(0, math.rad(180), 0) * CFrame.Angles(0, math.rad(90), math.rad(90))
+	bone.CFrame = targetCFrame
+	CollectionService:AddTag(bone, "Bone") -- Tag the bone
+	sound.playSummonSound(bone)
+	return bone, targetCFrame
+end
+function spawn.spawnBonesInCircle(targetPosition, options)
+	local numBones = options.middle.numBones or 8
+	local spawnRadius = options.middle.spawnRadius or 15
+	local boneHeight = options.middle.boneHeight or 2.5
+	local applyHeightAdjustment = options.applyHeightAdjustment or false
+	local boneTemplate = options.boneLocation or game:GetService("ReplicatedStorage").Assets:WaitForChild("bone")
+	if not boneTemplate then
+		warn("Bone template not found!")
+		return {}, targetPosition
+	end
+	local bones = {}
+	local spawnY = applyHeightAdjustment and (targetPosition.Y + boneHeight) or targetPosition.Y
+	local targetPoint = Vector3.new(targetPosition.X, spawnY, targetPosition.Z)
+	local angleStep = (2 * math.pi) / numBones
+	local debrisFolder = workspace:FindFirstChild("Debris") or Instance.new("Folder", workspace)
+	debrisFolder.Name = "Debris"
+	local bonesFolder = debrisFolder:FindFirstChild("Bones") or Instance.new("Folder", debrisFolder)
+	bonesFolder.Name = "Bones"
+	for i = 1, numBones do
+		local angle = angleStep * i
+		local spawnX = targetPoint.X + math.cos(angle) * spawnRadius
+		local spawnZ = targetPoint.Z + math.sin(angle) * spawnRadius
+		local spawnPosition = Vector3.new(spawnX, spawnY, spawnZ)
+		local bone = boneTemplate:Clone()
+		bone.Parent = bonesFolder
+		bone.Position = spawnPosition
+		local baseCFrame = CFrame.new(spawnPosition, targetPoint)
+		local targetCFrame = baseCFrame * CFrame.Angles(0, math.rad(180), 0) * CFrame.Angles(0, math.rad(90), math.rad(90))
+		bone.CFrame = targetCFrame
+		CollectionService:AddTag(bone, "Bone") -- Tag the bone
+		table.insert(bones, {
+			bone = bone,
+			spawnPosition = spawnPosition,
+			targetCFrame = targetCFrame,
+			direction = (targetPoint - spawnPosition).Unit,
+			hasStuck = false,
+			options = options
+		})
+	end
+	if #bones > 0 then
+		sound.playSummonSound(bones[1].bone)
+	end
+	return bones, targetPoint
+end
+return spawn
+local spin = {}
+function spin.spinBones(bones, options)
+	local spinsPerSecond = options.spinsPerSecond or 2
+	local rotationTime = options.rotationTime or 0.5
+	-- Calculate the target rotation for all bones
+	local spinSpeed = math.rad(180 * spinsPerSecond) -- Radians per second
+	local totalSpins = math.max(1, math.floor(spinsPerSecond * rotationTime)) -- Number of full spins to complete
+	local targetRotation = math.rad(180 * totalSpins) -- Total rotation angle to complete the desired number of spins
+	local tolerance = math.rad(0.1) -- Small tolerance for numerical precision (0.1 degrees in radians)
+	-- Track the total rotation for each bone
+	local rotations = {}
+	for _, data in ipairs(bones) do
+		local bone = data.bone
+		rotations[bone] = 0
+		-- Weld fx1 and fx2 to the Main part of the bone
+		local mainPart = bone:FindFirstChild("Main")
+		local fx1 = bone:FindFirstChild("fx1")
+		local fx2 = bone:FindFirstChild("fx2")
+		if mainPart and fx1 and fx2 then
+			-- Weld fx1 to Main
+			local weld1 = Instance.new("WeldConstraint")
+			weld1.Part0 = mainPart
+			weld1.Part1 = fx1
+			weld1.Parent = bone
+			-- Weld fx2 to Main
+			local weld2 = Instance.new("WeldConstraint")
+			weld2.Part0 = mainPart
+			weld2.Part1 = fx2
+			weld2.Parent = bone
+			-- Store welds in boneData for cleanup later
+			data.vfxWelds = {weld1, weld2}
+		end
+	end
+	-- Spin all bones simultaneously until all have reached the target rotation
+	local allDone = false
+	while not allDone do
+		local deltaTime = task.wait() -- Time since last frame
+		allDone = true -- Assume all bones are done unless proven otherwise
+		for _, data in ipairs(bones) do
+			local bone = data.bone
+			local totalRotation = rotations[bone]
+			if totalRotation < targetRotation - tolerance then
+				local rotationDelta = math.min(spinSpeed * deltaTime, targetRotation - totalRotation)
+				bone.CFrame = bone.CFrame * CFrame.Angles(0, 0, rotationDelta)
+				totalRotation = totalRotation + rotationDelta
+				rotations[bone] = totalRotation
+				allDone = false -- At least one bone is still spinning
+			end
+		end
+	end
+	return rotationTime -- Approximate total spin time
+end
+return spin
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local sound = require(script.Parent.sound)
+local vfx = {}
+function vfx.enableBloodEffects(bone, hitPart, hitPosition)
+	if not hitPart or not hitPart:IsA("BasePart") then
+		warn("Invalid hitPart in enableBloodEffects:", hitPart)
+		return
+	end
+	local bloodVFXTemplate = ReplicatedStorage:FindFirstChild("Assets") and ReplicatedStorage.Assets:FindFirstChild("VFX") and ReplicatedStorage.Assets.VFX:FindFirstChild("bloodvfx")
+	if not bloodVFXTemplate then
+		warn("bloodvfx not found in ReplicatedStorage.Assets.VFX!")
+		return
+	end
+	local mainAttachment = bloodVFXTemplate:FindFirstChild("Main")
+	if not mainAttachment or not mainAttachment:IsA("Attachment") then
+		warn("Main attachment not found in bloodvfx or is not an Attachment!")
+		return
+	end
+	local clonedAttachment = mainAttachment:Clone()
+	local localPosition = hitPart.CFrame:ToObjectSpace(CFrame.new(hitPosition)).Position
+	clonedAttachment.Position = localPosition
+	clonedAttachment.Parent = hitPart
+	for _, child in ipairs(clonedAttachment:GetChildren()) do
+		if child:IsA("ParticleEmitter") then
+			child.Enabled = true
+		end
+	end
+	task.delay(0.3, function()
+		for _, child in ipairs(clonedAttachment:GetChildren()) do
+			if child:IsA("ParticleEmitter") then
+				child.Enabled = false
+			end
+		end
+		task.delay(1, function()
+			clonedAttachment:Destroy()
+		end)
+	end)
+	sound.playBloodSound(hitPart)
+end
+return vfx
+local around = {}
+local spawn = require(script.Parent.Parent.main.spawn)
+local DamageModule = require(game.ServerScriptService.Other.DamageModule)
+function around.spawnBones(player, options)
+	local numBones = options.around.numBones or 8
+	local spawnRadius = options.around.spawnRadius or 5
+	local damageAmount = options.damageAmount or 10
+	local boneTemplate = options.boneLocation or game:GetService("ReplicatedStorage").Assets:WaitForChild("bone")
+	if not boneTemplate then
+		warn("Bone template not found!")
+		return {}
+	end
+	local character = player.Character
+	if not character then return {} end
+	local root = character:FindFirstChild("HumanoidRootPart")
+	if not root then return {} end
+	local centerPosition = root.Position
+	local bones = {}
+	local angleStep = (2 * math.pi) / numBones
+	for i = 1, numBones do
+		local angle = angleStep * i
+		local spawnX = centerPosition.X + math.cos(angle) * spawnRadius
+		local spawnZ = centerPosition.Z + math.sin(angle) * spawnRadius
+		local spawnPosition = Vector3.new(spawnX, centerPosition.Y, spawnZ)
+		-- Target position is straight outward from the player
+		local targetPosition = centerPosition + Vector3.new(math.cos(angle), 0, math.sin(angle)) * 1000
+		local bone = boneTemplate:Clone()
+		bone.Parent = workspace
+		bone.Position = spawnPosition
+		-- Orient the bone to face outward
+		local baseCFrame = CFrame.new(spawnPosition, targetPosition)
+		local targetCFrame = baseCFrame * CFrame.Angles(0, math.rad(180), 0) * CFrame.Angles(0, math.rad(90), math.rad(90))
+		bone.CFrame = targetCFrame
+		DamageModule:Attach(bone, damageAmount, player.Name)
+		table.insert(bones, {
+			bone = bone,
+			spawnPosition = spawnPosition,
+			targetCFrame = targetCFrame,
+			direction = (targetPosition - spawnPosition).Unit
+		})
+	end
+	return bones
+end
+return around
+local multiple = {}
+local spawn = require(script.Parent.Parent.main.spawn)
+local DamageModule = require(game.ServerScriptService.Other.DamageModule)
+function multiple.spawnBones(player, spawnPosition, targetPosition, options)
+	local numBones = options.multiple.numBones or 3
+	local spread = options.multiple.spread or 2
+	local damageAmount = options.damageAmount or 10
+	local bones = {}
+	local direction = (targetPosition - spawnPosition).Unit
+	local rightVector = direction:Cross(Vector3.new(0, 1, 0)).Unit
+	for i = 1, numBones do
+		local offset = rightVector * (i - (numBones + 1) / 2) * spread
+		local adjustedSpawnPosition = spawnPosition + offset
+		local bone, targetCFrame = spawn.spawnBone(adjustedSpawnPosition, targetPosition, options)
+		if bone then
+			DamageModule:Attach(bone, damageAmount, player.Name)
+			table.insert(bones, {
+				bone = bone,
+				spawnPosition = adjustedSpawnPosition,
+				targetCFrame = targetCFrame,
+				direction = direction
+			})
+		end
+	end
+	return bones
+end
+return multiple
+local CollectionService = game:GetService("CollectionService")
+local PhysicsService = game:GetService("PhysicsService")
+local vfx = require(script.Parent.Parent.main.vfx)
+local pierce = {}
+function pierce.apply(bone)
+	bone.CanCollide = false
+	bone.Anchored = true -- Keep anchored to prevent physics interference
+	bone.Massless = true
+	bone.CanTouch = true
+	local ownerName = bone:GetAttribute("OwnerName")
+	if not ownerName then
+		warn("OwnerName not set on bone!")
+		return
+	end
+	local ownerCharacter = game.Players:FindFirstChild(ownerName) and game.Players[ownerName].Character
+	if not ownerCharacter then
+		warn("Owner character not found for ownerName:", ownerName)
+		return
+	end
+	print("Owner character found:", ownerCharacter.Name)
+	-- Define collision groups
+	local boneGroup = "BoneGroup"
+	local ownerGroup = "OwnerGroup"
+	-- Register collision groups if they don't exist
+	if not PhysicsService:IsCollisionGroupRegistered(boneGroup) then
+		PhysicsService:RegisterCollisionGroup(boneGroup)
+	end
+	if not PhysicsService:IsCollisionGroupRegistered(ownerGroup) then
+		PhysicsService:RegisterCollisionGroup(ownerGroup)
+	end
+	-- Set collision groups for the bone
+	bone.CollisionGroup = boneGroup
+	-- Set collision groups for the owner's character parts and disable CanTouch
+	for _, part in ipairs(ownerCharacter:GetDescendants()) do
+		if part:IsA("BasePart") then
+			part.CollisionGroup = ownerGroup
+			part.CanTouch = false -- Prevent Touched events from firing for the owner
+		end
+	end
+	-- Ensure the groups don't collide
+	PhysicsService:CollisionGroupSetCollidable(boneGroup, ownerGroup, false)
+	local hitCharacters = {}
+	local debounce = false
+	local touchedConnection
+	touchedConnection = bone.Touched:Connect(function(hit)
+		if debounce then
+			print("Debounce active, skipping Touched event for:", hit.Name)
+			return
+		end
+		debounce = true
+		task.delay(0.1, function() debounce = false end)
+		if string.lower(hit.Name) == "bone" or CollectionService:HasTag(hit, "Bone") then
+			print("Ignoring bone hit:", hit.Name)
+			return
+		end
+		local character = hit.Parent
+		if character == ownerCharacter or hit:IsDescendantOf(ownerCharacter) then
+			print("Ignoring hit on owner:", character.Name)
+			return
+		end
+		local humanoid = character:FindFirstChild("Humanoid")
+		if humanoid and not hitCharacters[character] then
+			print("Hit character:", character.Name)
+			hitCharacters[character] = true
+			local hitPosition = bone.Position
+			if bone:FindFirstChild("BodyVelocity") then
+				bone.BodyVelocity:Destroy()
+			end
+			bone.Velocity = Vector3.new(0, 0, 0)
+			bone.RotVelocity = Vector3.new(0, 0, 0)
+			vfx.enableBloodEffects(bone, hit, hitPosition)
+		end
+	end)
+	bone.AncestryChanged:Connect(function()
+		if not bone:IsDescendantOf(game) then
+			print("Bone ancestry changed, disconnecting Touched event for:", bone.Name)
+			touchedConnection:Disconnect()
+		end
+	end)
+end
+return pierce
+local CollectionService = game:GetService("CollectionService")
+local sound = require(script.Parent.Parent.Parent.main.sound)
+local vfx = require(script.Parent.Parent.Parent.main.vfx)
+local disappear = require(script.Parent.Parent.Parent.main.disappear)
+local characters = {}
+local function decimalRandom(minimum, maximum)
+	return math.random() * (maximum - minimum) + minimum
+end
+function characters.attachToCharacter(bone, hit, boneData, specialLifetime, fadeDuration)
+	local weld = Instance.new("WeldConstraint")
+	weld.Part0 = hit
+	weld.Part1 = bone
+	weld.Parent = bone
+	-- Play a random blood sound using the sound module
+	sound.playBloodSound(bone)
+	-- Enable blood effects with proper hitPart and hitPosition
+	local hitPosition = bone.Position -- Default to bone's position
+	if hit:IsA("BasePart") then
+		-- Use the bone's position as the hit position, adjusted by the pierce effect below
+		vfx.enableBloodEffects(bone, hit, hitPosition)
+	else
+		warn("Hit part is not a BasePart, cannot apply blood VFX:", hit.Name)
+	end
+	-- Add a slight piercing effect
+	local direction = boneData.direction
+	local pierceNormal = direction.Unit
+	local pierceDepth = decimalRandom(0.25, 1.25)
+	local initialPosition = bone.Position
+	bone.Position = bone.Position + pierceNormal * pierceDepth
+	bone.CFrame = CFrame.new(bone.Position) * (bone.CFrame - bone.CFrame.Position)
+	-- Debug prints to verify pierceDepth
+	print("Characters pierceDepth:", pierceDepth)
+	print("PierceNormal magnitude:", pierceNormal.Magnitude)
+	print("Actual movement distance:", (bone.Position - initialPosition).Magnitude)
+	bone.CanCollide = false
+	bone.Anchored = false
+	boneData.hasStuck = true
+	-- Fade out and destroy after specialLifetime
+	task.delay(specialLifetime, function()
+		if bone then
+			local boneDataToFade = {bone = bone}
+			disappear.fadeOutBones({boneDataToFade}, fadeDuration)
+			task.wait(fadeDuration)
+			if bone then
+				bone:Destroy()
+			end
+		end
+	end)
+	print("Bone attached to character part:", hit.Name)
+end
+return characters
+local disappear = require(script.Parent.Parent.Parent.main.disappear)
+local sound = require(script.Parent.Parent.Parent.main.sound)
+local DamageModule = require(game.ServerScriptService.Other.DamageModule)
+local walls = {}
+local function decimalRandom(minimum, maximum)
+	return math.random() * (maximum - minimum) + minimum
+end
+function walls.attachToWall(bone, hit, boneData, wallLifetime, fadeDuration)
+	print("[Walls] attachToWall called for bone:", bone.Name, "hit:", hit.Name)
+	-- Check if hit is part of a character
+	local character = hit.Parent
+	local humanoid = character and character:FindFirstChild("Humanoid")
+	if humanoid and hit:IsDescendantOf(character) then
+		warn("[Walls] Tried to attach to a character part:", hit.Name, "in character:", character.Name, "—aborting!")
+		return
+	end
+	-- Check for existing welds
+	local existingWeld = bone:FindFirstChildOfClass("WeldConstraint")
+	if existingWeld then
+		warn("[Walls] Bone", bone.Name, "already has a weld! Weld:", existingWeld)
+	end
+	local weld = Instance.new("WeldConstraint")
+	weld.Part0 = hit
+	weld.Part1 = bone
+	weld.Parent = bone
+	-- Add a slight piercing effect
+	local direction = boneData.direction
+	local pierceNormal = direction.Unit
+	local pierceDepth = decimalRandom(0.25, 1.25) -- Same range as in characters module
+	local initialPosition = bone.Position
+	bone.Position = bone.Position + pierceNormal * pierceDepth
+	bone.CFrame = CFrame.new(bone.Position) * (bone.CFrame - bone.CFrame.Position)
+	-- Debug prints to verify pierceDepth
+	print("[Walls] pierceDepth:", pierceDepth)
+	print("[Walls] PierceNormal magnitude:", pierceNormal.Magnitude)
+	print("[Walls] Actual movement distance:", (bone.Position - initialPosition).Magnitude)
+	sound.playImpactSound(bone)
+	DamageModule:Detach(bone)
+	bone.CanCollide = true
+	bone.Anchored = false
+	boneData.hasStuck = true
+	print("[Walls] Bone welded to wall, hasStuck:", boneData.hasStuck)
+	task.delay(wallLifetime, function()
+		if bone then
+			print("[Walls] Fading bone:", bone.Name)
+			local boneDataToFade = {bone = bone}
+			disappear.fadeOutBones({boneDataToFade}, fadeDuration)
+			task.wait(fadeDuration)
+			if bone then
+				print("[Walls] Destroying bone:", bone.Name)
+				bone:Destroy()
+			end
+		end
+	end)
+	print("[Walls] Bone attached to wall:", hit.Name)
+end
+return walls
+local tool = script.Parent
+local player = game.Players.LocalPlayer
+local mouse = player:GetMouse()
+local remoteEvent = script.Event
+local spawnDistance = 3
+local spawnHeightOffset = 0
+local function getTargetPosition()
+	local origin = mouse.UnitRay.Origin
+	local direction = mouse.UnitRay.Direction * 1000
+	local raycastParams = RaycastParams.new()
+	raycastParams.FilterDescendantsInstances = {player.Character}
+	raycastParams.FilterType = Enum.RaycastFilterType.Exclude
+	raycastParams.IgnoreWater = true
+	local rayResult = workspace:Raycast(origin, direction, raycastParams)
+	if rayResult then
+		local hitPart = rayResult.Instance
+		local character = hitPart.Parent
+		local humanoid = character:FindFirstChild("Humanoid")
+		local targetCharacter = humanoid and character or nil
+		print("Raycast hit:", hitPart.Name, "Position:", rayResult.Position, "Target character:", targetCharacter and targetCharacter.Name or "None")
+		return rayResult.Position, targetCharacter
+	else
+		print("Raycast missed, using default position")
+		return origin + direction, nil
+	end
+end
+tool.Activated:Connect(function()
+	local character = player.Character
+	if not character then
+		warn("Player character not found!")
+		return
+	end
+	local root = character:FindFirstChild("HumanoidRootPart")
+	if not root then
+		warn("HumanoidRootPart not found!")
+		return
+	end
+	local targetPosition, targetCharacter = getTargetPosition()
+	local directionToTarget = (targetPosition - root.Position).Unit
+	local spawnPosition = root.Position + directionToTarget * spawnDistance
+	spawnPosition = spawnPosition + Vector3.new(0, spawnHeightOffset, 0)
+	print("Firing server: SpawnPosition:", spawnPosition, "TargetPosition:", targetPosition, "TargetCharacter:", targetCharacter and targetCharacter.Name or "None")
+	remoteEvent:FireServer(spawnPosition, targetPosition, targetCharacter)
+end)
+-- Example options table for BoneThrowModule.throwBones:
+-- {
+--     -- Core settings
+--     travelSpeed      = 50,    -- Studs per second the bone travels
+--     boneLifetime     = 5,     -- Seconds each bone exists before fading out
+--     rotationTime     = 0.5,   -- Duration of the spinning motion (seconds)
+--     spinsPerSecond   = 2,     -- Number of full spins per second during rotation
+--     damageAmount     = 10,    -- Damage dealt by each bone on hit
+--     specialLifetime  = 3,     -- Lifetime (seconds) for bones stuck to characters (used by sticky/stickPierce)
+--     wallLifetime     = 5,     -- Lifetime (seconds) for bones stuck to walls
+--     boneLocation     = game:GetService("ReplicatedStorage").Assets:FindFirstChild("bone"), -- Custom bone model (BasePart or Model)
+--     fadeDuration     = 1,     -- Duration (seconds) of the fade-out effect when bones are destroyed
+--
+--     -- Direction
+--     direction        = "click", -- "click" (use targetPosition), "straight" (forward from player), or "custom"
+--     customDirection  = nil,     -- Custom direction vector (used if direction = "custom")
+--
+--     -- Variants
+--     middle           = {enabled = false, numBones = 8, spawnRadius = 15, boneHeight = 2.5}, -- Middle variant: spawns bones in a circle around target
+--     multiple         = {enabled = false, numBones = 3, spread = 2}, -- Multiple variant: spawns multiple bones with a spread
+--     around           = {enabled = false, numBones = 8, spawnRadius = 5}, -- Around variant: spawns bones in a circle around the player
+--     collision        = "pierce", -- Collision behavior: "sticky", "pierce", "stickPierce", "piercing", or nil
+--     variant          = nil,      -- Visual variant: "blue", "orange", "randomBO", or nil (default bone appearance)
+-- }
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local BoneThrowModule = require(game.ServerScriptService.Other.BoneThrowModule)
+local remoteEvent = script.Parent
+remoteEvent.OnServerEvent:Connect(function(player, spawnPosition, targetPosition, targetCharacter)
+	if not player.Character then return end
+	if typeof(spawnPosition) ~= "Vector3" or typeof(targetPosition) ~= "Vector3" then return end
+	local options = {
+		travelSpeed = 50,
+		boneLifetime = 2,
+		rotationTime = 0.5,
+		spinsPerSecond = 2,
+		damageAmount = 10,
+		specialLifetime = 3,
+		wallLifetime = 5,
+		boneLocation = ReplicatedStorage:FindFirstChild("Assets") and ReplicatedStorage.Assets:FindFirstChild("bone"),
+		fadeDuration = 0.5,
+		direction = "click",
+		middle = {enabled = false, numBones = 8, spawnRadius = 15, boneHeight = 2.5},
+		multiple = {enabled = false, numBones = 3, spread = 2},
+		around = {enabled = false, numBones = 8, spawnRadius = 5},
+		collision = "pierce",
+		variant = nil,
+		targetCharacter = targetCharacter
+	}
+	BoneThrowModule.throwBones(player, spawnPosition, targetPosition, options)
+end)
